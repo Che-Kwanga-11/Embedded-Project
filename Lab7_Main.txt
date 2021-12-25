@@ -1,0 +1,181 @@
+// Lab 7
+// Che Kwanga
+
+//-----------------------------------------------------------------------------
+// Hardware Target
+//-----------------------------------------------------------------------------
+
+// Target Platform: EK-TM4C123GXL
+// Target uC:       TM4C123GH6PM
+// System Clock:    40 MHz
+// Stack:           512 bytes (2048 needed for sprintf)
+
+// Hardware configuration:
+// UART Interface:
+//   U0TX (PA1) and U0RX (PA0) are connected to the 2nd controller
+//   The USB on the 2nd controller enumerates to an ICDI interface and a virtual COM port
+//   Configured to 115,200 baud, 8N1
+// Frequency counter and timer input:
+//   FREQ_IN on PC6 (WT1CCP0)
+
+//-----------------------------------------------------------------------------
+// Device includes, defines, and assembler directives
+//-----------------------------------------------------------------------------
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdbool.h>
+#include <string.h>
+#include "clock.h"
+#include "uart0.h"
+#include "tm4c123gh6pm.h"
+#include "lab7_Che_Kwanga.h"
+// PortC masks
+#define FREQ_IN_MASK 64
+//-----------------------------------------------------------------------------
+// Global variables
+//-----------------------------------------------------------------------------
+
+uint32_t time[50];
+uint8_t count=0;
+uint8_t code[32];
+bool valid=false;
+uint32_t t;
+char codeWord[32];
+
+//-----------------------------------------------------------------------------
+// Subroutines
+//-----------------------------------------------------------------------------
+
+// Initialize Hardware
+void initHw()
+{
+    // Initialize system clock to 40 MHz
+    initSystemClockTo40Mhz();
+
+    // Enable clocks
+    SYSCTL_RCGCWTIMER_R |= SYSCTL_RCGCWTIMER_R1;
+    SYSCTL_RCGCGPIO_R |= SYSCTL_RCGCGPIO_R2;
+    _delay_cycles(3);
+
+    // Configure FREQ_IN for frequency counter
+    GPIO_PORTC_DIR_R &=~FREQ_IN_MASK;                      // define as input
+    GPIO_PORTC_AFSEL_R |= FREQ_IN_MASK;              // select alternative functions for FREQ_IN pin
+    GPIO_PORTC_PCTL_R &= ~GPIO_PCTL_PC6_M;           // map alt fns to FREQ_IN
+    GPIO_PORTC_PCTL_R |= GPIO_PCTL_PC6_WT1CCP0;
+    GPIO_PORTC_DEN_R |= FREQ_IN_MASK;                // enable bit 6 for digital input
+
+    GPIO_PORTC_IS_R &=~FREQ_IN_MASK;    //setting 0 makes it edge sensitive, 1 makes it level sensitive
+    GPIO_PORTC_IBE_R &=~FREQ_IN_MASK;   //setting 0 makes interrupts controlled by Interrupt event register for a single edge or level
+    GPIO_PORTC_IEV_R &=~FREQ_IN_MASK;   //setting 0 makes it detect falling edges
+    GPIO_PORTC_ICR_R |=FREQ_IN_MASK;    //clear any interrupts
+    GPIO_PORTC_IM_R  |=FREQ_IN_MASK;    //interrupt is sent to interrupt controller
+    NVIC_EN0_R |= 1 << (INT_GPIOC-16);  // set interrupt
+
+    // Configure Wide Timer 1 as timer
+        WTIMER1_CTL_R &= ~TIMER_CTL_TAEN;                // turn-off counter before reconfiguring
+        WTIMER1_CFG_R   = 4;                               // configure as 32-bit counter (A only)
+        WTIMER1_TAMR_R  = TIMER_TAMR_TAMR_PERIOD;          // make the counter periodic
+        WTIMER1_TAMR_R &= ~TIMER_TAMR_TACDIR;             // make it count down
+        WTIMER1_TAV_R  = 0xFFFFFFFF;                      // MAX counter for first period
+        WTIMER1_TAPR_R  = 40;                              // pre-scale value to get 1MHZ rate
+        WTIMER1_CTL_R |= TIMER_CTL_TAEN;                 // turn-on counter
+}
+
+// Print the code after verifying that the code is valid and complementary.
+void printCode(){
+    //check for appropriate address and complementary. Stop if not valid.
+    uint8_t i,j,k;
+    for(i=0;i<16;i++){
+          if(codeWord[i]==address[i]){
+             if(i==15){valid=true;
+             putsUart0("True Address");
+             }
+          }else{
+             valid=false;
+             return;
+              }
+        }
+    //check dataCodes for matching code and print corresponding name from dataNames
+    for(j=0;j<48;j++){
+        for(i=0;i<16;i++){
+            k=16+i;
+         if(codeWord[k]==dataCodes[j][i]){
+           if(i==15){
+            putsUart0("\t");
+            putsUart0(dataNames[j]);
+            return;
+              }
+           }else{break;}
+          }
+    }
+}
+void GPIOIsr(){
+        time[count]=WTIMER1_TAV_R;      //place time stamp from timer
+        if(count==0){
+            count++;
+            GPIO_PORTC_ICR_R |=FREQ_IN_MASK; //clear interrupt flag
+            return;
+        }
+        if(count==1){
+            uint32_t t=time[0]-time[1];   //get time interval between edges
+            t=t/1000;                     //to get a more appropriate value
+             if(((t<=14)&&(t>=13))){      //detect leader code
+              count++;
+              putsUart0("\nLeader Code Correct\t");
+              GPIO_PORTC_ICR_R |=FREQ_IN_MASK;
+              return;
+             }else{
+                count=0;
+                GPIO_PORTC_ICR_R |=FREQ_IN_MASK;
+                return;
+               }
+            }
+        if(count==34){
+           int k;
+           WTIMER1_TAV_R = 0xFFFFFFFF;  //reset timer
+           for(k=0;k<count-2;k++){
+           codeWord[k]=code[k];         //place code into a char for external use
+            }
+           printCode();                 //call print method to print appropriate code
+           count=0;
+            }
+        if(count>34){count=0;           //reset the count in case any count exceeds required edges
+        GPIO_PORTC_ICR_R |=FREQ_IN_MASK;
+            return;}
+        if(count>1){
+             uint32_t t=time[count-1]-time[count];
+             t=t/1000;
+             if((t<2)&&(t>=1)){        //detect 0 bit
+                 code[count-2]=0;
+                 count++;
+                 GPIO_PORTC_ICR_R |=FREQ_IN_MASK;
+                 return;
+             }
+             if((t<3)&&(t>=2)){      //detect 1 bit
+                 code[count-2]=1;    //place corresponding bit into code, two places down to start from zero
+                 count++;
+                 GPIO_PORTC_ICR_R |=FREQ_IN_MASK;
+                 return;
+                }else{
+                  count=0;
+                 }
+             count++;
+             GPIO_PORTC_ICR_R |=FREQ_IN_MASK;
+             return;
+             }
+   }
+//-----------------------------------------------------------------------------
+// Main
+//-----------------------------------------------------------------------------
+
+int main(void)
+{
+    // Initialize hardware
+    initHw();
+    initUart0();
+    // Setup UART0 baud rate
+    //setUart0BaudRate(115200, 40e6);
+    putsUart0("\nStart");
+    while(1){}
+}
